@@ -11,9 +11,10 @@ use embedded_hal::digital::v2::OutputPin;
 use embedded_time::fixed_point::FixedPoint;
 use panic_probe as _;
 
+use pio::{ArrayVec, Program, SideSet, Wrap};
 use rp2040_hal::{
     gpio::FunctionPio0,
-    pio::{PIOExt, PinDir, PinState},
+    pio::{PIOExt, PinDir, PinState, Running, StateMachine, SM0},
 };
 // Provide an alias for our BSP so we can switch targets quickly.
 // Uncomment the BSP you included in Cargo.toml, the rest of the code does not need t&mut o change.
@@ -24,18 +25,39 @@ use bsp::hal::{
     clocks::{init_clocks_and_plls, Clock},
     i2c::I2C,
     pac,
+    pac::RESETS,
     pio::PIOBuilder,
+    pio::PIO,
     sio::Sio,
     watchdog::Watchdog,
 };
 
-struct NeoPixel<PIO: PIOExt> {
-    pio: PIO,
+struct NeoPixel<P: PIOExt> {
+    pio: PIO<P>,
+    sm: StateMachine<(P, SM0), Running>,
 }
 
-impl<PIO: PIOExt> NeoPixel<PIO> {
-    fn new(pio: PIO) -> Self {
-        NeoPixel { pio }
+impl<P: PIOExt> NeoPixel<P> {
+    fn new(pio: P, resets: &mut RESETS) -> Self {
+        let (mut pio, sm0, _, _, _) = pio.split(resets);
+        let program = Program {
+            code: ArrayVec::from([
+                0x6221, 0x1123, 0x1400, 0xa442, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ]),
+            origin: Some(0),
+            wrap: Wrap {
+                source: 3,
+                target: 0,
+            },
+            side_set: SideSet::new(true, 1, false),
+        };
+        let installed = pio.install(&program).unwrap();
+        let (mut sm, rx, tx) = PIOBuilder::from_program(installed).build(sm0);
+        sm.set_pins([(0, PinState::High)]);
+        sm.set_pindirs([(0, PinDir::Output)]);
+        let sm = sm.start();
+        Self { pio, sm }
     }
 }
 
@@ -61,19 +83,7 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
-    let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
-    let program = pio_proc::pio_asm!(
-        ".wrap_target",
-        "set pins, 1 [31]",
-        "set pins, 0 [31]",
-        ".wrap"
-    )
-    .program;
-    let installed = pio.install(&program).unwrap();
-    let (mut sm, rx, tx) = PIOBuilder::from_program(installed).build(sm0);
-    sm.set_pins([(0, PinState::High)]);
-    sm.set_pindirs([(0, PinDir::Output)]);
-    sm.start();
+    let neo_pixel = NeoPixel::new(pac.PIO0, &mut pac.RESETS);
 
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
 
