@@ -32,58 +32,6 @@ use bsp::hal::{
     watchdog::Watchdog,
 };
 
-pub struct NeoPixel<const N: usize, P: PIOExt> {
-    pio: PIO<P>,
-    sm: StateMachine<(P, SM0), Running>,
-    tx: pio::Tx<(P, SM0)>,
-    pixels: [u32; N],
-}
-
-impl<const N: usize, P: PIOExt> NeoPixel<N, P> {
-    pub fn new(pio: P, pin: u8, resets: &mut RESETS, clock_manager: &ClocksManager) -> Self {
-        let (mut pio, sm0, _, _, _) = pio.split(resets);
-        let program = pio_proc::pio_asm!(
-            ".side_set 1",
-            "set pindirs, 1  side 0 [0]",
-            ".wrap_target",
-            "out x, 1        side 0 [2]",
-            "jmp !x, 3       side 1 [1]",
-            "jmp 0           side 1 [4]",
-            "nop             side 0 [4]",
-            ".wrap"
-        )
-        .program;
-        let installed = pio.install(&program).unwrap();
-        let (sm, rx, tx) = PIOBuilder::from_program(installed)
-            .side_set_pin_base(pin)
-            .clock_divisor(
-                (clock_manager.system_clock.freq().integer() as f32) / ((800000 * 10) as f32),
-            )
-            .out_shift_direction(pio::ShiftDirection::Left)
-            .autopull(true)
-            .buffers(pio::Buffers::OnlyRx)
-            .build(sm0);
-        let sm = sm.start();
-        Self {
-            pio,
-            sm,
-            tx,
-            pixels: [0; N],
-        }
-    }
-    pub fn set_pixel(&mut self, index: u16, pixel: u32) {
-        let index = index as usize;
-        if index < N {
-            self.pixels[index] = pixel;
-        }
-    }
-    pub fn show(&mut self) {
-        for pixel in self.pixels.iter() {
-            self.tx.write(pixel);
-        }
-    }
-}
-
 #[entry]
 fn main() -> ! {
     info!("Program start");
@@ -114,17 +62,7 @@ fn main() -> ! {
         sio.gpio_bank0,
         &mut pac.RESETS,
     );
-    let _pin0 = pins.gpio0.into_mode::<FunctionPio0>();
 
-    let mut neo_power = pins.gpio11.into_push_pull_output();
-    neo_power.set_high().unwrap();
-    let mut neo_pixel = NeoPixel::<1, _>::new(pac.PIO0, 11, &mut pac.RESETS, &clocks);
-    neo_pixel.set_pixel(0, 0x00FFFFFF);
-    neo_pixel.show();
-
-    // let i2c = I2C::i2c0(pac.I2C0, pins., scl_pin, freq, resets, system_clock);
-
-    // let mut led_pin = pins.led.into_push_pull_output();
     let mut blue_pin = pins.led.into_push_pull_output();
     let mut green_pin = pins.gpio16.into_push_pull_output();
     let mut red_pin = pins.gpio17.into_push_pull_output();
