@@ -8,9 +8,13 @@ use cortex_m_rt::entry;
 use defmt::*;
 use defmt_rtt as _;
 use embedded_hal::digital::v2::OutputPin;
-use embedded_time::{fixed_point::FixedPoint, rate::Hertz};
+use embedded_time::fixed_point::FixedPoint;
 use panic_probe as _;
-use rp_pico as _;
+
+#[link_section = ".boot2"]
+#[no_mangle]
+#[used]
+pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 
 use rp2040_hal as hal;
 
@@ -39,7 +43,7 @@ fn h2rgb(h: u16) -> RGB8 {
 
 #[entry]
 fn main() -> ! {
-    info!("Program start");
+    info!("P&mut rogram start");
     let mut pac = pac::Peripherals::take().unwrap();
     let core = pac::CorePeripherals::take().unwrap();
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
@@ -77,42 +81,68 @@ fn main() -> ! {
         clocks.peripheral_clock.freq(),
     );
 
-    let i2c_event_iterator = i2c::I2C::new_peripheral_event_iterator(
+    let mut i2c_event_iterator = i2c::I2C::new_peripheral_event_iterator(
         pac.I2C1,
         pins.gpio6.into_mode(),
         pins.gpio7.into_mode(),
         &mut pac.RESETS,
-        0xFF,
+        0x65,
     );
 
     let mut blue_pin = pins.gpio25.into_push_pull_output();
     // let mut green_pin = pins.gpio16.into_push_pull_output();
     // let mut red_pin = pins.gpio17.into_push_pull_output();
 
-    for event in i2c_event_iterator {
-        match event {
-            i2c::peripheral::I2CEvent::Start => {
-                info!("I2C start");
-            }
-            i2c::peripheral::I2CEvent::Restart => {
-                info!("I2C restart");
-            }
-            i2c::peripheral::I2CEvent::TransferRead => {
-                info!("I2C read");
-            }
-            i2c::peripheral::I2CEvent::TransferWrite => {
-                info!("I2C write");
-            }
-            i2c::peripheral::I2CEvent::Stop => {
-                info!("I2C stop");
-            }
-        }
-    }
-
     let mut h = 0;
     const DIFFH: u16 = 50;
 
+    enum I2CState {
+        Idle,
+        Start,
+        Read,
+        Write,
+    }
+
+    let mut i2c_state = I2CState::Idle;
+
+    let mut regs = [0u8; 0x10];
+
     loop {
+        loop {
+            match i2c_event_iterator.next() {
+                Some(i2c::peripheral::I2CEvent::Start) => {
+                    i2c_state = I2CState::Start;
+                }
+                Some(i2c::peripheral::I2CEvent::TransferRead) => {
+                    i2c_state = I2CState::Read;
+                }
+                Some(i2c::peripheral::I2CEvent::TransferWrite) => {
+                    i2c_state = I2CState::Write;
+                }
+                Some(i2c::peripheral::I2CEvent::Restart) => {
+                    i2c_state = I2CState::Start;
+                }
+                Some(i2c::peripheral::I2CEvent::Stop) => match i2c_state {
+                    I2CState::Read => {}
+                    I2CState::Write => {
+                        let mut buffer = [0u8; 16];
+                        let size = i2c_event_iterator.read(&mut buffer[..]) as u8;
+                        if size > 0 {
+                            let reg = buffer[0];
+                            for pos in 1..size {
+                                let reg = reg + pos - 1;
+                                if (reg as usize) < regs.len() {
+                                    regs[reg as usize] = buffer[pos as usize];
+                                }
+                            }
+                        }
+                    }
+                    I2CState::Start | I2CState::Idle => {}
+                },
+                None => break,
+            }
+        }
+
         info!("on!");
         blue_pin.set_high().unwrap();
         ws.write([h2rgb(h)].iter().copied()).unwrap();
