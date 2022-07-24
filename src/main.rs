@@ -4,27 +4,31 @@
 #![no_std]
 #![no_main]
 
-use cortex_m_rt::entry;
+use core::{borrow::BorrowMut, convert::Infallible, sync::atomic::Ordering};
+use cortex_m_rt as _;
 use defmt::*;
 use defmt_rtt as _;
-use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::digital::v2::{OutputPin, PinState};
 use embedded_time::fixed_point::FixedPoint;
 use panic_probe as _;
-
-#[link_section = ".boot2"]
-#[no_mangle]
-#[used]
-pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 
 use rp2040_hal as hal;
 
 use hal::{
     clocks::{init_clocks_and_plls, Clock},
-    gpio, i2c, pac,
+    entry, gpio, i2c, pac,
     pio::PIOExt,
     sio::Sio,
     watchdog::Watchdog,
 };
+
+use usb_device::{class_prelude::*, prelude::*};
+use usbd_serial::SerialPort;
+
+#[link_section = ".boot2"]
+#[no_mangle]
+#[used]
+pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 
 use smart_leds::{SmartLedsWrite, RGB8};
 use ws2812_pio::Ws2812Direct;
@@ -41,18 +45,49 @@ fn h2rgb(h: u16) -> RGB8 {
     }
 }
 
+// use device::interrupt;
+use pac::interrupt;
+
+static LED_PIN: core::sync::atomic::AtomicPtr<
+    *mut dyn OutputPin<Error = core::convert::Infallible>,
+> = core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+#[interrupt]
+fn USBCTRL_IRQ() {
+    static FLAG: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+    if let Some(pin) = unsafe {
+        LED_PIN
+            .load(core::sync::atomic::Ordering::Acquire)
+            .as_ref()
+            .map(|p| p.as_mut())
+    }
+    .flatten()
+    {
+        pin.set_state(if FLAG.load(Ordering::Relaxed) {
+            PinState::High
+        } else {
+            PinState::Low
+        })
+        .unwrap();
+        FLAG.store(FLAG.load(Ordering::Acquire), Ordering::Release)
+    }
+}
+
+// https://github.com/rp-rs/rp-hal/blob/12387bcf09fc0ff56f4cabaeecdb132fcbf5ba15/boards/seeeduino-xiao-rp2040/src/lib.rs#L69
+const XOSC_CRYSTAL_FREQ: u32 = 12_000_000;
+
 #[entry]
 fn main() -> ! {
-    info!("P&mut rogram start");
+    info!("Program start");
     let mut pac = pac::Peripherals::take().unwrap();
     let core = pac::CorePeripherals::take().unwrap();
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
     let sio = Sio::new(pac.SIO);
 
     // External high-speed crystal on the pico board is 12Mhz
-    let external_xtal_freq_hz = 12_000_000;
     let clocks = init_clocks_and_plls(
-        external_xtal_freq_hz,
+        XOSC_CRYSTAL_FREQ,
         pac.XOSC,
         pac.CLOCKS,
         pac.PLL_SYS,
@@ -63,7 +98,26 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
+    // Set up the USB driver
+    let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
+        pac.USBCTRL_REGS,
+        pac.USBCTRL_DPRAM,
+        clocks.usb_clock,
+        true,
+        &mut pac.RESETS,
+    ));
+
+    // Set up the USB Communications Class Device driver
+    let mut serial = SerialPort::new(&usb_bus);
+
+    // Create a USB device with a fake VID and PID
+    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27dd))
+        .manufacturer("Fake company")
+        .product("Serial port")
+        .serial_number("TEST")
+        .device_class(2) // from: https://www.usb.org/defined-class-codes
+        .build();
+
     let pins = gpio::bank0::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
@@ -71,88 +125,142 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    let mut neo_pixel_power = pins.gpio11.into_push_pull_output();
-    neo_pixel_power.set_high().unwrap();
-    let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
-    let mut ws = Ws2812Direct::new(
-        pins.gpio12.into_mode(),
-        &mut pio,
-        sm0,
-        clocks.peripheral_clock.freq(),
-    );
+    // let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
 
-    let mut i2c_event_iterator = i2c::I2C::new_peripheral_event_iterator(
-        pac.I2C1,
-        pins.gpio6.into_mode(),
-        pins.gpio7.into_mode(),
-        &mut pac.RESETS,
-        0x65,
-    );
+    // let mut neo_pixel_power = pins.gpio11.into_push_pull_output();
+    // neo_pixel_power.set_high().unwrap();
+    // let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
+    // let mut ws = Ws2812Direct::new(
+    //     pins.gpio12.into_mode(),
+    //     &mut pio,
+    //     sm0,
+    //     clocks.peripheral_clock.freq(),
+    // );
+
+    // let mut i2c_event_iterator = i2c::I2C::new_peripheral_event_iterator(
+    //     pac.I2C1,
+    //     pins.gpio6.into_mode(),
+    //     pins.gpio7.into_mode(),
+    //     &mut pac.RESETS,
+    //     0x65,
+    // );
 
     let mut blue_pin = pins.gpio25.into_push_pull_output();
-    // let mut green_pin = pins.gpio16.into_push_pull_output();
-    // let mut red_pin = pins.gpio17.into_push_pull_output();
+    blue_pin.set_high().unwrap();
+    let mut green_pin = pins.gpio16.into_push_pull_output();
+    // green_pin.set_low().unwrap();
+    green_pin.set_high().unwrap();
+    let mut red_pin = pins.gpio17.into_push_pull_output();
+    // red_pin.set_low().unwrap();
+    red_pin.set_high().unwrap();
+    let mut blue_pin_ptr = &mut blue_pin as *mut dyn OutputPin<Error = core::convert::Infallible>;
+    LED_PIN.store(&mut blue_pin_ptr as *mut _, Ordering::Release);
 
-    let mut h = 0;
-    const DIFFH: u16 = 50;
+    // let mut h = 0;
+    // const DIFFH: u16 = 50;
 
-    enum I2CState {
-        Idle,
-        Start,
-        Read,
-        Write,
-    }
+    let timer = hal::Timer::new(pac.TIMER, &mut pac.RESETS);
+    let mut said_hello = false;
 
-    let mut i2c_state = I2CState::Idle;
+    let mut pin_flag = true;
 
-    let mut regs = [0u8; 0x10];
+    let mut command_processor = SerialCommandProcessor::new();
 
     loop {
-        loop {
-            match i2c_event_iterator.next() {
-                Some(i2c::peripheral::I2CEvent::Start) => {
-                    i2c_state = I2CState::Start;
+        // A welcome message at the beginning
+        if !said_hello && timer.get_counter() >= 2_000_000 {
+            said_hello = true;
+            let _ = serial.write(b"Hello, World!\r\n");
+        }
+
+        // Check for new data
+        if usb_dev.poll(&mut [&mut serial]) {
+            let mut buf = [0u8; 64];
+            match serial.read(&mut buf) {
+                Ok(0) | Err(_) => {
+                    // Do nothing
                 }
-                Some(i2c::peripheral::I2CEvent::TransferRead) => {
-                    i2c_state = I2CState::Read;
-                }
-                Some(i2c::peripheral::I2CEvent::TransferWrite) => {
-                    i2c_state = I2CState::Write;
-                }
-                Some(i2c::peripheral::I2CEvent::Restart) => {
-                    i2c_state = I2CState::Start;
-                }
-                Some(i2c::peripheral::I2CEvent::Stop) => match i2c_state {
-                    I2CState::Read => {}
-                    I2CState::Write => {
-                        let mut buffer = [0u8; 16];
-                        let size = i2c_event_iterator.read(&mut buffer[..]) as u8;
-                        if size > 0 {
-                            let reg = buffer[0];
-                            for pos in 1..size {
-                                let reg = reg + pos - 1;
-                                if (reg as usize) < regs.len() {
-                                    regs[reg as usize] = buffer[pos as usize];
-                                }
+                Ok(count) => {
+                    command_processor.process_buff(&buf[..count], &mut serial);
+                    red_pin
+                        .set_state({
+                            pin_flag = !pin_flag;
+                            if pin_flag {
+                                PinState::High
+                            } else {
+                                PinState::Low
                             }
-                        }
-                    }
-                    I2CState::Start | I2CState::Idle => {}
-                },
-                None => break,
+                        })
+                        .unwrap();
+                }
             }
         }
 
-        info!("on!");
-        blue_pin.set_high().unwrap();
-        ws.write([h2rgb(h)].iter().copied()).unwrap();
-        h = (h + DIFFH) % (255 * 6);
-        delay.delay_ms(16);
-        info!("off!");
-        blue_pin.set_low().unwrap();
-        ws.write([h2rgb(h)].iter().copied()).unwrap();
-        h = (h + DIFFH) % (255 * 6);
-        delay.delay_ms(16);
+        // info!("on!");
+        // blue_pin.set_high().unwrap();
+        // ws.write([h2rgb(h)].iter().copied()).unwrap();
+        // h = (h + DIFFH) % (255 * 6);
+        // delay.delay_ms(16);
+        // info!("off!");
+        // blue_pin.set_low().unwrap();
+        // ws.write([h2rgb(h)].iter().copied()).unwrap();
+        // h = (h + DIFFH) % (255 * 6);
+        // delay.delay_ms(16);
+    }
+}
+
+struct SerialCommandProcessor {
+    buffer: [u8; 32],
+    end_pos: usize,
+}
+
+impl SerialCommandProcessor {
+    fn new() -> Self {
+        Self {
+            buffer: Default::default(),
+            end_pos: 0,
+        }
+    }
+    fn process_buff<B: UsbBus, RS: BorrowMut<[u8]>, WS: BorrowMut<[u8]>>(
+        &mut self,
+        buff: &[u8],
+        serial: &mut SerialPort<'_, B, RS, WS>,
+    ) {
+        let mut split = buff.split(|b| b == &b'\r' || b == &b'\n').peekable();
+        while let Some(p) = split.next() {
+            if split.peek().is_none() {
+                if self.end_pos + p.len() <= self.buffer.len() {
+                    self.buffer[self.end_pos..]
+                        .iter_mut()
+                        .take(p.len())
+                        .zip(core::iter::successors(Some(0), |v| Some(v + 1)))
+                        .for_each(|(v, index)| {
+                            *v = p[index];
+                        });
+                    self.end_pos += p.len();
+                    let _ = serial.write(p);
+                } else {
+                    self.end_pos = 0;
+                }
+            } else {
+                let end_pos = self.end_pos;
+                self.end_pos = 0;
+
+                let cmp = |buff: &[u8]| {
+                    self.buffer[..end_pos].iter().chain(p.iter()).cmp(buff)
+                        == core::cmp::Ordering::Equal
+                };
+
+                if cmp(b"") {
+                    // Do Nothing
+                } else {
+                    let _ = serial.write(b"\r\n");
+                    if cmp(b"AAA") {
+                        let _ = serial.write(b"AAA\r\n");
+                    }
+                }
+            }
+        }
     }
 }
 

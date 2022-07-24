@@ -29,6 +29,9 @@ pio = "0.2.0"
 ws2812-pio = "0.3.0"
 smart-leds = "0.3.0"
 
+usb-device= "0.2.8"
+usbd-serial = "0.1.1"
+
 # cargo build/run
 [profile.dev]
 codegen-units = 1
