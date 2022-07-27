@@ -164,7 +164,14 @@ fn main() -> ! {
 
     let mut pin_flag = true;
 
-    let mut command_processor = SerialCommandProcessor::new();
+    let commands = [Command {
+        name: b"test",
+        func: &|serial| {
+            write_bytes(serial, &core.CPUID.base.read().to_ne_bytes());
+            serial.write(b"\r\n");
+        },
+    }];
+    let mut command_processor = SerialCommandProcessor::new(&commands);
 
     loop {
         // A welcome message at the beginning
@@ -209,14 +216,62 @@ fn main() -> ! {
     }
 }
 
-struct SerialCommandProcessor {
+trait Write {
+    fn write(&mut self, data: &[u8]);
+    fn flush(&mut self);
+}
+
+impl<B: UsbBus, RS: BorrowMut<[u8]>, WS: BorrowMut<[u8]>> Write for SerialPort<'_, B, RS, WS> {
+    fn write(&mut self, data: &[u8]) {
+        let _ = self.write(data);
+    }
+    fn flush(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+struct Command<'a> {
+    name: &'static [u8],
+    func: &'a (dyn Fn(&mut dyn Write) + 'static),
+}
+
+struct SerialCommandProcessor<'a, 'b> {
+    commands: &'a [Command<'b>],
     buffer: [u8; 32],
     end_pos: usize,
 }
 
-impl SerialCommandProcessor {
-    fn new() -> Self {
+fn byte_to_chars(byte: u8) -> [u8; 2] {
+    let u4_to_b = |u4| {
+        if u4 <= 9 {
+            u4 + b'0'
+        } else {
+            u4 - 10 + b'A'
+        }
+    };
+    let upper = byte >> 4;
+    let lower = byte & 0xF;
+    [u4_to_b(upper), u4_to_b(lower)]
+}
+
+fn write_bytes(w: &mut (impl Write + ?Sized), bytes: &[u8]) {
+    w.write(b"[");
+    let mut first = true;
+    for byte in bytes {
+        if !first {
+            w.write(b", ");
+        }
+        w.write(b"0x");
+        w.write(&byte_to_chars(*byte));
+        first = false;
+    }
+    w.write(b"]");
+}
+
+impl<'a, 'b> SerialCommandProcessor<'a, 'b> {
+    fn new(commands: &'a [Command<'b>]) -> Self {
         Self {
+            commands,
             buffer: Default::default(),
             end_pos: 0,
         }
@@ -255,8 +310,10 @@ impl SerialCommandProcessor {
                     // Do Nothing
                 } else {
                     let _ = serial.write(b"\r\n");
-                    if cmp(b"AAA") {
-                        let _ = serial.write(b"AAA\r\n");
+                    if let Some(command) = self.commands.iter().find(|c| cmp(c.name)) {
+                        (command.func)(serial);
+                    } else {
+                        let _ = serial.write(b"no command\r\n");
                     }
                 }
             }
