@@ -5,6 +5,7 @@
 #![no_main]
 
 use core::{borrow::BorrowMut, convert::Infallible, sync::atomic::Ordering};
+use cortex_m::interrupt::InterruptNumber;
 use cortex_m_rt as _;
 use defmt::*;
 use defmt_rtt as _;
@@ -167,7 +168,7 @@ fn main() -> ! {
     let commands = [Command {
         name: b"test",
         func: &|serial| {
-            write_bytes(serial, &core.CPUID.base.read().to_ne_bytes());
+            // write_bytes(serial, &core.CPUID.base.read().to_ne_bytes());
             serial.write(b"\r\n");
         },
     }];

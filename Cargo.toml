@@ -7,8 +7,8 @@ version = "0.1.0"
 resolver = "2"
 
 [dependencies]
-cortex-m = "0.7.3"
-cortex-m-rt = "0.7.0"
+cortex-m = "0.7.6"
+cortex-m-rt = "0.7.1"
 embedded-hal = { version = "0.2.5", features = ["unproven"] }
 embedded-time = "0.12.0"
 
@@ -20,16 +20,16 @@ panic-probe = { version = "0.3.0", features = ["print-defmt"] }
 # sparkfun-pro-micro-rp2040 = "0.2.0"
 
 # If you're not going to use a Board Support Package you'll need these:
-rp2040-hal = { version="0.5.0", features=["rt"] }
-rp2040-boot2 = "0.2.0"
+rp2040-hal = { version="0.6.0", features=["rt"] }
+rp2040-boot2 = "0.2.1"
 
 pio-proc = "0.2.1"
 pio = "0.2.0"
 
-ws2812-pio = "0.3.0"
+ws2812-pio = "0.4.0"
 smart-leds = "0.3.0"
 
-usb-device= "0.2.8"
+usb-device= "0.2.9"
 usbd-serial = "0.1.1"
 
 # cargo build/run
