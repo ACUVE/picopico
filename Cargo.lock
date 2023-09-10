@@ -1174,7 +1174,6 @@ dependencies = [
  "byte-slice-cast 1.2.2",
  "cortex-m",
  "cortex-m-rt",
- "critical-section",
  "defmt",
  "defmt-rtt",
  "display-interface",
