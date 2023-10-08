@@ -5,11 +5,11 @@
 #![feature(type_alias_impl_trait)]
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_rp::bind_interrupts;
 use embassy_rp::peripherals::PIO0;
 use embassy_rp::pio::{
     Common, Config, InterruptHandler, Irq, Pio, PioPin, ShiftDirection, StateMachine,
 };
+use embassy_rp::{bind_interrupts, config};
 use fixed::traits::ToFixed;
 use fixed_macro::types::U56F8;
 use {defmt_rtt as _, panic_probe as _};
@@ -27,19 +27,32 @@ fn setup_pio_task_sm0<'a>(
 
     // Send data serially to pin
     let prg = pio_proc::pio_asm!(
-        ".origin 16",
-        "set pindirs, 1",
+        ".side_set 1",
+        ".define public t1 2",
+        ".define public t2 5",
+        ".define public t3 3",
+        ".lang_opt python sideset_init = pico.PIO.OUT_HIGH",
+        ".lang_opt python out_init     = pico.PIO.OUT_HIGH",
+        ".lang_opt python out_shiftdir = 1",
         ".wrap_target",
-        "out pins,1 [19]",
+        "bitloop:",
+        "    out x, 1       side 0 [t3 - 1]",
+        "    jmp !x do_zero side 1 [t1 - 1]",
+        "do_one:",
+        "    jmp  bitloop   side 1 [t2 - 1]",
+        "do_zero:",
+        "    nop            side 0 [t2 - 1]",
         ".wrap",
     );
+
+    let cycles_per_bit = prg.public_defines.t1 + prg.public_defines.t2 + prg.public_defines.t3;
 
     let mut cfg = Config::default();
     cfg.use_program(&pio.load_program(&prg.program), &[]);
     let out_pin = pio.make_pio_pin(pin);
     cfg.set_out_pins(&[&out_pin]);
     cfg.set_set_pins(&[&out_pin]);
-    cfg.clock_divider = (U56F8!(125_000_000) / 20 / 200).to_fixed();
+    // cfg.clock_divider = (U56F8!(125_000_000) / 20 / 200).to_fixed();
     cfg.shift_out.auto_fill = true;
     sm.set_config(&cfg);
 }
@@ -116,7 +129,8 @@ async fn pio_task_sm2(mut irq: Irq<'static, PIO0, 3>, mut sm: StateMachine<'stat
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_rp::init(Default::default());
+    let config = config::Config::default();
+    let p = embassy_rp::init(config);
     let pio = p.PIO0;
 
     let Pio {
@@ -129,9 +143,9 @@ async fn main(spawner: Spawner) {
     } = Pio::new(pio, Irqs);
 
     setup_pio_task_sm0(&mut common, &mut sm0, p.PIN_0);
-    setup_pio_task_sm1(&mut common, &mut sm1);
-    setup_pio_task_sm2(&mut common, &mut sm2);
+    // setup_pio_task_sm1(&mut common, &mut sm1);
+    // setup_pio_task_sm2(&mut common, &mut sm2);
     spawner.spawn(pio_task_sm0(sm0)).unwrap();
-    spawner.spawn(pio_task_sm1(sm1)).unwrap();
-    spawner.spawn(pio_task_sm2(irq3, sm2)).unwrap();
+    // spawner.spawn(pio_task_sm1(sm1)).unwrap();
+    // spawner.spawn(pio_task_sm2(irq3, sm2)).unwrap();
 }
