@@ -3,149 +3,359 @@
 #![no_std]
 #![no_main]
 #![feature(type_alias_impl_trait)]
-use defmt::info;
+
+mod cds;
+mod rbc;
+
+use core::mem::MaybeUninit;
+
 use embassy_executor::Spawner;
-use embassy_rp::peripherals::PIO0;
-use embassy_rp::pio::{
-    Common, Config, InterruptHandler, Irq, Pio, PioPin, ShiftDirection, StateMachine,
-};
+use embassy_rp::gpio::{AnyPin, Level, Output, Pin};
 use embassy_rp::{bind_interrupts, config};
-use fixed::traits::ToFixed;
-use fixed_macro::types::U56F8;
+use embassy_time::{Duration, Timer};
+use embassy_usb_driver::{Endpoint, EndpointIn, EndpointOut};
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
-    PIO0_IRQ_0 => InterruptHandler<PIO0>;
+    PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<embassy_rp::peripherals::PIO0>;
+    USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<embassy_rp::peripherals::USB>;
 });
 
-fn setup_pio_task_sm0<'a>(
-    pio: &mut Common<'a, PIO0>,
-    sm: &mut StateMachine<'a, PIO0, 0>,
-    pin: impl PioPin,
-) {
-    // Setup sm0
-
-    // Send data serially to pin
-    let prg = pio_proc::pio_asm!(
-        ".side_set 1",
-        ".define public t1 2",
-        ".define public t2 5",
-        ".define public t3 3",
-        ".lang_opt python sideset_init = pico.PIO.OUT_HIGH",
-        ".lang_opt python out_init     = pico.PIO.OUT_HIGH",
-        ".lang_opt python out_shiftdir = 1",
-        ".wrap_target",
-        "bitloop:",
-        "    out x, 1       side 0 [t3 - 1]",
-        "    jmp !x do_zero side 1 [t1 - 1]",
-        "do_one:",
-        "    jmp  bitloop   side 1 [t2 - 1]",
-        "do_zero:",
-        "    nop            side 0 [t2 - 1]",
-        ".wrap",
-    );
-
-    let cycles_per_bit = prg.public_defines.t1 + prg.public_defines.t2 + prg.public_defines.t3;
-
-    let mut cfg = Config::default();
-    cfg.use_program(&pio.load_program(&prg.program), &[]);
-    let out_pin = pio.make_pio_pin(pin);
-    cfg.set_out_pins(&[&out_pin]);
-    cfg.set_set_pins(&[&out_pin]);
-    // cfg.clock_divider = (U56F8!(125_000_000) / 20 / 200).to_fixed();
-    cfg.shift_out.auto_fill = true;
-    sm.set_config(&cfg);
+struct State {
+    control: MaybeUninit<Control>,
 }
 
-#[embassy_executor::task]
-async fn pio_task_sm0(mut sm: StateMachine<'static, PIO0, 0>) {
-    sm.set_enable(true);
-
-    let mut v = 0x0f0caffa;
-    loop {
-        sm.tx().wait_push(v).await;
-        v ^= 0xffff;
-        info!("Pushed {:032b} to FIFO", v);
+impl State {
+    pub fn new() -> Self {
+        Self {
+            control: MaybeUninit::uninit(),
+        }
     }
 }
 
-fn setup_pio_task_sm1<'a>(pio: &mut Common<'a, PIO0>, sm: &mut StateMachine<'a, PIO0, 1>) {
-    // Setupm sm1
+const MSD_GET_MAX_LUN: u8 = 0xfe;
+const MSD_BBB_RESET: u8 = 0xff;
 
-    // Read 0b10101 repeatedly until ISR is full
-    let prg = pio_proc::pio_asm!(
-        //
-        ".origin 8",
-        "set x, 0x15",
-        ".wrap_target",
-        "in x, 5 [31]",
-        ".wrap",
-    );
+const MAX_PACKET_SIZE: u16 = 64;
 
-    let mut cfg = Config::default();
-    cfg.use_program(&pio.load_program(&prg.program), &[]);
-    cfg.clock_divider = (U56F8!(125_000_000) / 2000).to_fixed();
-    cfg.shift_in.auto_fill = true;
-    cfg.shift_in.direction = ShiftDirection::Right;
-    sm.set_config(&cfg);
+struct Control {
+    data_if: embassy_usb::types::InterfaceNumber,
 }
 
-#[embassy_executor::task]
-async fn pio_task_sm1(mut sm: StateMachine<'static, PIO0, 1>) {
-    sm.set_enable(true);
-    loop {
-        let rx = sm.rx().wait_pull().await;
-        info!("Pulled {:032b} from FIFO", rx);
+impl embassy_usb::Handler for Control {
+    fn control_in<'a>(
+        &'a mut self,
+        req: embassy_usb::control::Request,
+        buf: &'a mut [u8],
+    ) -> Option<embassy_usb::control::InResponse<'a>> {
+        if (req.request_type, req.recipient, req.index)
+            != (
+                embassy_usb::control::RequestType::Class,
+                embassy_usb::control::Recipient::Interface,
+                self.data_if.0 as u16,
+            )
+        {
+            return None;
+        }
+        match req.request {
+            MSD_GET_MAX_LUN if req.value == 0 && req.length == 1 => {
+                buf[0] = 0;
+                Some(embassy_usb::control::InResponse::Accepted(&buf[..1]))
+            }
+            _ => Some(embassy_usb::control::InResponse::Rejected),
+        }
+    }
+    fn control_out(
+        &mut self,
+        req: embassy_usb::control::Request,
+        _data: &[u8],
+    ) -> Option<embassy_usb::control::OutResponse> {
+        if (req.request_type, req.recipient, req.index)
+            != (
+                embassy_usb::control::RequestType::Class,
+                embassy_usb::control::Recipient::Interface,
+                self.data_if.0 as u16,
+            )
+        {
+            return None;
+        }
+
+        match req.request {
+            MSD_BBB_RESET if req.value == 0 && req.length == 0 => {
+                Some(embassy_usb::control::OutResponse::Accepted)
+            }
+            _ => Some(embassy_usb::control::OutResponse::Rejected),
+        }
     }
 }
 
-fn setup_pio_task_sm2<'a>(pio: &mut Common<'a, PIO0>, sm: &mut StateMachine<'a, PIO0, 2>) {
-    // Setup sm2
-
-    // Repeatedly trigger IRQ 3
-    let prg = pio_proc::pio_asm!(
-        ".origin 0",
-        ".wrap_target",
-        "set x,10",
-        "delay:",
-        "jmp x-- delay [15]",
-        "irq 3 [15]",
-        ".wrap",
-    );
-    let mut cfg = Config::default();
-    cfg.use_program(&pio.load_program(&prg.program), &[]);
-    cfg.clock_divider = (U56F8!(125_000_000) / 2000).to_fixed();
-    sm.set_config(&cfg);
+struct MassStorageClassBbb<'d, D: embassy_usb_driver::Driver<'d>> {
+    data_if: embassy_usb::types::InterfaceNumber,
+    bulk_in_ep: D::EndpointIn,
+    bulk_out_ep: D::EndpointOut,
 }
 
-#[embassy_executor::task]
-async fn pio_task_sm2(mut irq: Irq<'static, PIO0, 3>, mut sm: StateMachine<'static, PIO0, 2>) {
-    sm.set_enable(true);
-    loop {
-        irq.wait().await;
-        info!("IRQ trigged");
+impl<'d, D: embassy_usb_driver::Driver<'d>> MassStorageClassBbb<'d, D> {
+    pub fn new(builder: &mut embassy_usb::Builder<'d, D>, state: &'d mut State) -> Self {
+        let mut function = builder.function(0x08, 0x06, 0x50);
+        let mut interface = function.interface();
+        let data_if = interface.interface_number();
+        let mut alt_setting = interface.alt_setting(0x08, 0x06, 0x50, None);
+        let bulk_in_ep = alt_setting.endpoint_bulk_in(MAX_PACKET_SIZE);
+        let bulk_out_ep = alt_setting.endpoint_bulk_out(MAX_PACKET_SIZE);
+
+        drop(function);
+
+        let control = state.control.write(Control { data_if });
+        builder.handler(control);
+
+        Self {
+            data_if,
+            bulk_in_ep,
+            bulk_out_ep,
+        }
     }
 }
 
+fn manage_cbw_and_data(cbw: &cds::Cbw, data: &rbc::Data) -> cds::Csw {
+    let is_host_to_device = cbw.bmCBWFlags & 0x80 != 0x80;
+    let host_assumed_data_length = cbw.dCBWDataTransferLength;
+
+    let mut csw = cds::Csw {
+        dCSWTag: cbw.dCBWTag,
+        dCSWDataResidue: 0,
+        bCSWStatus: 0,
+    };
+
+    if host_assumed_data_length == 0 {
+        if let &rbc::Data::None = data {
+            // do nothing
+        } else {
+            csw.bCSWStatus = 0x02;
+        }
+    } else if is_host_to_device {
+        // host to device
+        match data {
+            rbc::Data::None => {
+                csw.dCSWDataResidue = host_assumed_data_length;
+                csw.bCSWStatus = 0x01;
+            }
+            rbc::Data::RecvDummy(len) => {
+                if len.get() <= host_assumed_data_length {
+                    csw.dCSWDataResidue = host_assumed_data_length - len.get();
+                } else {
+                    csw.bCSWStatus = 0x02;
+                }
+            }
+            rbc::Data::Send(_) | rbc::Data::SendDummy(_) => {
+                csw.bCSWStatus = 0x02;
+            }
+        }
+    } else {
+        // device to host
+        match data {
+            rbc::Data::None => {
+                csw.dCSWDataResidue = host_assumed_data_length;
+                csw.bCSWStatus = 0x01;
+            }
+            rbc::Data::Send(data) => {
+                match data.len().cmp(&(host_assumed_data_length as _)) {
+                    core::cmp::Ordering::Equal => {
+                        // do nothing
+                    }
+                    core::cmp::Ordering::Less => {
+                        csw.dCSWDataResidue = host_assumed_data_length - data.len() as u32;
+                    }
+                    core::cmp::Ordering::Greater => {
+                        csw.bCSWStatus = 0x02;
+                    }
+                }
+            }
+            rbc::Data::SendDummy(len) => match len.get().cmp(&host_assumed_data_length) {
+                core::cmp::Ordering::Equal => {
+                    // do nothing
+                }
+                core::cmp::Ordering::Less => {
+                    csw.dCSWDataResidue = host_assumed_data_length - len.get();
+                }
+                core::cmp::Ordering::Greater => {
+                    csw.bCSWStatus = 0x02;
+                }
+            },
+            rbc::Data::RecvDummy(_) => {
+                csw.bCSWStatus = 0x02;
+            }
+        }
+    }
+    csw
+}
+
+async fn process_cbw<'d, 'a, D: embassy_usb_driver::Driver<'d>>(
+    mass_storage: &mut MassStorageClassBbb<'d, D>,
+    handler: &mut rbc::RbcHandler,
+    cbw: &cds::Cbw<'a>,
+) -> Result<bool, u8> {
+    let mut buffer = [0u8; 32];
+    let data = handler.handle(cbw.CBWCB, &mut buffer).map_err(|_| 0x01)?;
+    let csw = match &data {
+        Some(data) => manage_cbw_and_data(&cbw, data),
+        None => cds::Csw {
+            dCSWTag: cbw.dCBWTag,
+            dCSWDataResidue: 0,
+            bCSWStatus: 0x01,
+        },
+    };
+    // 取り敢えず、Host の考える処理をする
+    if cbw.dCBWDataTransferLength == 0 {
+        // do nothing
+    } else if cbw.bmCBWFlags & 0x80 != 0x80 {
+        // host to device
+        let mut needed = cbw.dCBWDataTransferLength;
+        let mut buffer2 = [0u8; MAX_PACKET_SIZE as usize];
+        while needed > 0 {
+            let read_size = mass_storage
+                .bulk_out_ep
+                .read(&mut buffer2)
+                .await
+                .map_err(|_| 0x02)?;
+            needed = needed.saturating_sub(read_size as _);
+        }
+    } else {
+        // device to host
+        let mut needed = cbw.dCBWDataTransferLength;
+        let real_send = match data {
+            Some(rbc::Data::Send(data)) => data,
+            _ => &[],
+        };
+        let mut real_send = &real_send[..needed as _];
+        while needed > 0 {
+            let mut send_buffer = [0u8; MAX_PACKET_SIZE as usize];
+            let buf = &mut send_buffer[..needed as _];
+            buf.copy_from_slice(&real_send);
+            mass_storage.bulk_in_ep.write(buf).await.map_err(|_| 0x03)?;
+            let send_data = buf.len() as u32;
+            needed = needed.saturating_sub(send_data);
+            real_send = &real_send[send_data as usize..];
+        }
+    }
+    // Send Status
+    mass_storage
+        .bulk_in_ep
+        .write(cds::byteify_csw(&mut buffer, &csw).map_err(|_| 0x04)?.0)
+        .await
+        .map_err(|_| 0x05)?;
+
+    Ok(csw.bCSWStatus == 0x00)
+}
+
+// In は Host から見て Device が In するので、Device は Write する
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let config = config::Config::default();
     let p = embassy_rp::init(config);
-    let pio = p.PIO0;
 
-    let Pio {
-        mut common,
-        irq3,
-        mut sm0,
-        mut sm1,
-        mut sm2,
-        ..
-    } = Pio::new(pio, Irqs);
+    let mut pin_red = Output::new(p.PIN_17.degrade(), Level::High);
+    let mut pin_blue = Output::new(p.PIN_25.degrade(), Level::High);
 
-    setup_pio_task_sm0(&mut common, &mut sm0, p.PIN_0);
-    // setup_pio_task_sm1(&mut common, &mut sm1);
-    // setup_pio_task_sm2(&mut common, &mut sm2);
-    spawner.spawn(pio_task_sm0(sm0)).unwrap();
-    // spawner.spawn(pio_task_sm1(sm1)).unwrap();
-    // spawner.spawn(pio_task_sm2(irq3, sm2)).unwrap();
+    spawner.spawn(blink(p.PIN_16.degrade())).unwrap();
+
+    let usb = p.USB;
+    let driver = embassy_rp::usb::Driver::new(usb, Irqs);
+
+    let mut usb_config = embassy_usb::Config::new(0xee, 0xff);
+    usb_config.serial_number = Some("THISISTESTERIALNUMBER");
+
+    let mut device_descriptor_buf = [0u8; 128];
+    let mut config_descriptor_buf = [0u8; 128];
+    let mut bos_descriptor_buf = [0u8; 128];
+    let mut control_buf = [0u8; 128];
+
+    let mut state = State::new();
+
+    let mut builder = embassy_usb::Builder::new(
+        driver,
+        usb_config,
+        &mut device_descriptor_buf,
+        &mut config_descriptor_buf,
+        &mut bos_descriptor_buf,
+        &mut control_buf,
+    );
+
+    let mut mass_storage = MassStorageClassBbb::new(&mut builder, &mut state);
+
+    let mut device = builder.build();
+
+    let device_handle_future = device.run();
+    let mass_storage_future = async {
+        let mut first = true;
+        loop {
+            mass_storage.bulk_in_ep.wait_enabled().await;
+            mass_storage.bulk_out_ep.wait_enabled().await;
+
+            let mut out_packet = [0u8; MAX_PACKET_SIZE as usize];
+
+            let mut handler = rbc::RbcHandler::new();
+
+            loop {
+                match mass_storage.bulk_out_ep.read(&mut out_packet).await {
+                    Ok(n) => match cds::parse_cbw(&out_packet[..n]) {
+                        Ok(cbw) => match process_cbw(&mut mass_storage, &mut handler, &cbw).await {
+                            Ok(success_command) => {
+                                pin_red.set_high();
+
+                                if success_command {
+                                    // success なら Blue LED を点灯
+                                    pin_blue.set_low();
+                                } else {
+                                    // fail なら Blue LED を消灯
+                                    pin_blue.set_high();
+                                }
+
+                                LED_BLINK.store(
+                                    LED_BLINK.load(core::sync::atomic::Ordering::Relaxed) + 1,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                );
+                            }
+                            Err(_) => {
+                                pin_red.set_low();
+                            }
+                        },
+                        Err(_) => {
+                            pin_red.set_low();
+                        }
+                    },
+                    Err(_) => {
+                        pin_red.set_low();
+                        break;
+                    }
+                }
+            }
+        }
+    };
+
+    embassy_futures::join::join(device_handle_future, mass_storage_future).await;
+}
+
+static LED_BLINK: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+#[embassy_executor::task]
+async fn blink(pin: AnyPin) {
+    let mut led = Output::new(pin, Level::Low);
+
+    loop {
+        let v1to10 = {
+            let blink = LED_BLINK.load(core::sync::atomic::Ordering::Relaxed);
+            if blink == 0 {
+                0
+            } else {
+                LED_BLINK.load(core::sync::atomic::Ordering::Relaxed) % 9 + 1
+            }
+        };
+        let v10to1 = 10 - v1to10;
+        // Timekeeping is globally available, no need to mess with hardware timers.
+        led.set_high();
+        Timer::after(Duration::from_millis(100 * v10to1 as u64)).await;
+        led.set_low();
+        Timer::after(Duration::from_millis(100 * v1to10 as u64)).await;
+    }
 }
