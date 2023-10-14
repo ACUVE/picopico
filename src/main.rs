@@ -190,28 +190,21 @@ fn manage_cbw_and_data(cbw: &cds::Cbw, data: &rbc::Data) -> cds::Csw {
     csw
 }
 
-async fn process_cbw<'d, 'a, D: embassy_usb_driver::Driver<'d>>(
+async fn process_cbw<'d, 'a, 'b, D: embassy_usb_driver::Driver<'d>>(
     mass_storage: &mut MassStorageClassBbb<'d, D>,
     handler: &mut rbc::RbcHandler,
     cbw: &cds::Cbw<'a>,
+    pin_red: &mut Output<'b, AnyPin>,
 ) -> Result<bool, u8> {
     let mut buffer = [0u8; 32];
     let data = handler.handle(cbw.CBWCB, &mut buffer).map_err(|_| 0x01)?;
-    let csw = match &data {
-        Some(data) => manage_cbw_and_data(&cbw, data),
-        None => cds::Csw {
-            dCSWTag: cbw.dCBWTag,
-            dCSWDataResidue: 0,
-            bCSWStatus: 0x01,
-        },
-    };
     // 取り敢えず、Host の考える処理をする
     if cbw.dCBWDataTransferLength == 0 {
         // do nothing
-    } else if cbw.bmCBWFlags & 0x80 != 0x80 {
+    } else if cbw.bmCBWFlags & 0x80 == 0 {
         // host to device
         let mut needed = cbw.dCBWDataTransferLength;
-        let mut buffer2 = [0u8; MAX_PACKET_SIZE as usize];
+        let mut buffer2 = [0u8; MAX_PACKET_SIZE as _];
         while needed > 0 {
             let read_size = mass_storage
                 .bulk_out_ep
@@ -219,6 +212,7 @@ async fn process_cbw<'d, 'a, D: embassy_usb_driver::Driver<'d>>(
                 .await
                 .map_err(|_| 0x02)?;
             needed = needed.saturating_sub(read_size as _);
+            pin_red.set_low();
         }
     } else {
         // device to host
@@ -229,15 +223,23 @@ async fn process_cbw<'d, 'a, D: embassy_usb_driver::Driver<'d>>(
         };
         let mut real_send = &real_send[..needed as _];
         while needed > 0 {
-            let mut send_buffer = [0u8; MAX_PACKET_SIZE as usize];
+            let mut send_buffer = [0u8; MAX_PACKET_SIZE as _];
             let buf = &mut send_buffer[..needed as _];
             buf.copy_from_slice(&real_send);
             mass_storage.bulk_in_ep.write(buf).await.map_err(|_| 0x03)?;
             let send_data = buf.len() as u32;
             needed = needed.saturating_sub(send_data);
-            real_send = &real_send[send_data as usize..];
+            real_send = &real_send[send_data as _..];
         }
     }
+    let csw = match &data {
+        Some(data) => manage_cbw_and_data(&cbw, data),
+        None => cds::Csw {
+            dCSWTag: cbw.dCBWTag,
+            dCSWDataResidue: 0,
+            bCSWStatus: 0x01,
+        },
+    };
     // Send Status
     mass_storage
         .bulk_in_ep
@@ -292,34 +294,31 @@ async fn main(spawner: Spawner) {
             mass_storage.bulk_in_ep.wait_enabled().await;
             mass_storage.bulk_out_ep.wait_enabled().await;
 
-            let mut out_packet = [0u8; MAX_PACKET_SIZE as usize];
+            let mut out_packet = [0u8; MAX_PACKET_SIZE as _];
 
             let mut handler = rbc::RbcHandler::new();
 
             loop {
                 match mass_storage.bulk_out_ep.read(&mut out_packet).await {
                     Ok(n) => match cds::parse_cbw(&out_packet[..n]) {
-                        Ok(cbw) => match process_cbw(&mut mass_storage, &mut handler, &cbw).await {
-                            Ok(success_command) => {
-                                pin_red.set_high();
+                        Ok(cbw) => {
+                            match process_cbw(&mut mass_storage, &mut handler, &cbw, &mut pin_red)
+                                .await
+                            {
+                                Ok(_success_command) => {
+                                    // pin_red.set_high();
+                                    // pin_red.set_high();
 
-                                if success_command {
-                                    // success なら Blue LED を点灯
-                                    pin_blue.set_low();
-                                } else {
-                                    // fail なら Blue LED を消灯
-                                    pin_blue.set_high();
+                                    LED_BLINK.store(
+                                        LED_BLINK.load(core::sync::atomic::Ordering::Relaxed) + 1,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    );
                                 }
-
-                                LED_BLINK.store(
-                                    LED_BLINK.load(core::sync::atomic::Ordering::Relaxed) + 1,
-                                    core::sync::atomic::Ordering::Relaxed,
-                                );
+                                Err(_) => {
+                                    pin_red.set_low();
+                                }
                             }
-                            Err(_) => {
-                                pin_red.set_low();
-                            }
-                        },
+                        }
                         Err(_) => {
                             pin_red.set_low();
                         }

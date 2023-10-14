@@ -11,14 +11,14 @@ pub(crate) struct Cbw<'a> {
 #[derive(Debug)]
 pub(crate) enum ParseCbwError {
     InvalidSignature,
-    BufferTooSmall,
+    BufferSize,
     LengthZero,
     LengthOverflow,
 }
 
-pub(crate) fn parse_cbw(buff: &[u8]) -> Result<Cbw, ParseCbwError> {
-    if buff.len() < 16 {
-        return Err(ParseCbwError::BufferTooSmall);
+pub(crate) fn parse_cbw<'a>(buff: &'a [u8]) -> Result<(Cbw<'a>), ParseCbwError> {
+    if buff.len() != 0x1F {
+        return Err(ParseCbwError::BufferSize);
     }
     let signature = u32::from_le_bytes([buff[0], buff[1], buff[2], buff[3]]);
     if signature != 0x43425355 {
