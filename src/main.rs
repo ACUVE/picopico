@@ -210,9 +210,8 @@ async fn process_cbw<'d, 'a, 'b, D: embassy_usb_driver::Driver<'d>>(
                 .bulk_out_ep
                 .read(&mut buffer2)
                 .await
-                .map_err(|_| 0x02)?;
+                .map_err(|_| 0x04)?;
             needed = needed.saturating_sub(read_size as _);
-            pin_red.set_low();
         }
     } else {
         // device to host
@@ -221,15 +220,18 @@ async fn process_cbw<'d, 'a, 'b, D: embassy_usb_driver::Driver<'d>>(
             Some(rbc::Data::Send(data)) => data,
             _ => &[],
         };
-        let mut real_send = &real_send[..needed as _];
+        let mut real_send = &real_send[..core::cmp::min(needed as _, real_send.len())];
         while needed > 0 {
             let mut send_buffer = [0u8; MAX_PACKET_SIZE as _];
-            let buf = &mut send_buffer[..needed as _];
-            buf.copy_from_slice(&real_send);
-            mass_storage.bulk_in_ep.write(buf).await.map_err(|_| 0x03)?;
+            let buf = &mut send_buffer[..core::cmp::min(needed, MAX_PACKET_SIZE as _) as _];
+            let buf_len = buf.len();
+            let read_send_len = real_send.len();
+            let copy_read_send_len = core::cmp::min(buf_len, read_send_len);
+            buf[..copy_read_send_len].copy_from_slice(&real_send[..copy_read_send_len]);
+            mass_storage.bulk_in_ep.write(buf).await.map_err(|_| 0x08)?;
             let send_data = buf.len() as u32;
             needed = needed.saturating_sub(send_data);
-            real_send = &real_send[send_data as _..];
+            real_send = &real_send[copy_read_send_len as _..];
         }
     }
     let csw = match &data {
@@ -245,9 +247,28 @@ async fn process_cbw<'d, 'a, 'b, D: embassy_usb_driver::Driver<'d>>(
         .bulk_in_ep
         .write(cds::byteify_csw(&mut buffer, &csw).map_err(|_| 0x04)?.0)
         .await
-        .map_err(|_| 0x05)?;
+        .map_err(|_| 0x10)?;
 
     Ok(csw.bCSWStatus == 0x00)
+}
+
+async fn show_bits<'b, 'c>(
+    val: u8,
+    pin_red: &mut Output<'b, AnyPin>,
+    pin_blue: &mut Output<'c, AnyPin>,
+) {
+    for i in 0..7 {
+        pin_red.set_low();
+        Timer::after(Duration::from_millis(500)).await;
+        pin_red.set_high();
+        if val & (0x1 << i) != 0 {
+            pin_blue.set_low();
+        } else {
+            pin_blue.set_high();
+        }
+        Timer::after(Duration::from_millis(500)).await;
+        pin_blue.set_high();
+    }
 }
 
 // In は Host から見て Device が In するので、Device は Write する
@@ -259,6 +280,7 @@ async fn main(spawner: Spawner) {
     let mut pin_red = Output::new(p.PIN_17.degrade(), Level::High);
     let mut pin_blue = Output::new(p.PIN_25.degrade(), Level::High);
 
+    // let mut _pin_green = Output::new(p.PIN_16.degrade(), Level::High);
     spawner.spawn(blink(p.PIN_16.degrade())).unwrap();
 
     let usb = p.USB;
@@ -306,25 +328,37 @@ async fn main(spawner: Spawner) {
                                 .await
                             {
                                 Ok(_success_command) => {
-                                    // pin_red.set_high();
-                                    // pin_red.set_high();
+                                    pin_red.set_high();
 
                                     LED_BLINK.store(
                                         LED_BLINK.load(core::sync::atomic::Ordering::Relaxed) + 1,
                                         core::sync::atomic::Ordering::Relaxed,
                                     );
                                 }
-                                Err(_) => {
+                                Err(num) => {
+                                    // pin_red.set_low();
+                                    show_bits(cbw.CBWCB.len() as _, &mut pin_red, &mut pin_blue)
+                                        .await;
                                     pin_red.set_low();
+                                    Timer::after(Duration::from_millis(1000)).await;
+                                    show_bits(cbw.CBWCB[0], &mut pin_red, &mut pin_blue).await;
+                                    pin_red.set_low();
+                                    Timer::after(Duration::from_millis(1000)).await;
+                                    show_bits(num, &mut pin_red, &mut pin_blue).await;
                                 }
                             }
                         }
                         Err(_) => {
                             pin_red.set_low();
+                            Timer::after(Duration::from_millis(3000)).await;
+                            pin_red.set_high();
                         }
                     },
                     Err(_) => {
                         pin_red.set_low();
+                        pin_red.set_low();
+                        Timer::after(Duration::from_millis(3000)).await;
+                        pin_red.set_high();
                         break;
                     }
                 }
@@ -339,7 +373,7 @@ static LED_BLINK: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::n
 
 #[embassy_executor::task]
 async fn blink(pin: AnyPin) {
-    let mut led = Output::new(pin, Level::Low);
+    let mut led = Output::new(pin, Level::High);
 
     loop {
         let v1to10 = {
@@ -351,10 +385,9 @@ async fn blink(pin: AnyPin) {
             }
         };
         let v10to1 = 10 - v1to10;
-        // Timekeeping is globally available, no need to mess with hardware timers.
-        led.set_high();
-        Timer::after(Duration::from_millis(100 * v10to1 as u64)).await;
         led.set_low();
         Timer::after(Duration::from_millis(100 * v1to10 as u64)).await;
+        led.set_high();
+        Timer::after(Duration::from_millis(100 * v10to1 as u64)).await;
     }
 }

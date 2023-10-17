@@ -412,7 +412,6 @@ name = "embassy-net"
 version = "0.1.0"
 dependencies = [
  "as-slice 0.2.1",
- "atomic-polyfill 1.0.2",
  "atomic-pool",
  "defmt",
  "embassy-net-driver",
@@ -464,14 +463,13 @@ dependencies = [
  "embedded-hal 1.0.0-rc.1",
  "embedded-hal-async",
  "embedded-hal-nb",
- "embedded-io 0.5.0",
+ "embedded-io 0.6.0",
  "embedded-io-async",
  "embedded-storage",
  "embedded-storage-async",
  "fixed",
  "futures",
  "nb 1.0.0",
- "paste",
  "pio",
  "pio-proc",
  "rand_core",
@@ -481,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "embassy-sync"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cfg-if",
  "critical-section",
@@ -492,9 +490,8 @@ dependencies = [
 
 [[package]]
 name = "embassy-time"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
- "atomic-polyfill 1.0.2",
  "cfg-if",
  "critical-section",
  "defmt",
@@ -606,17 +603,17 @@ dependencies = [
 
 [[package]]
 name = "embedded-io"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "658bbadc628dc286b9ae02f0cb0f5411c056eb7487b72f0083203f115de94060"
+checksum = "fa9417478b5440a2c25f95b25e3ec6ec92e7f9a7ae90c9719e434daeec4ece71"
 
 [[package]]
 name = "embedded-io-async"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1394754ad749a560b25a0c70dcd2b66a450824a1311fc475bb2ccbfabe7f8414"
+checksum = "de03527d6fb488b2d7c7a4dc81dfb6a657efe264256bfc70bb899746821666b1"
 dependencies = [
- "embedded-io 0.5.0",
+ "embedded-io 0.6.0",
 ]
 
 [[package]]
@@ -632,9 +629,9 @@ dependencies = [
 
 [[package]]
 name = "embedded-nal-async"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e706b5288eceaa582155b24d54e23385429402e4e99ae984f4a0a6a65b635f15"
+checksum = "a0f75f0ac83505f354443332324ef1399463902718b95b4ce153ae9b3660f341"
 dependencies = [
  "embedded-io-async",
  "embedded-nal",

@@ -34,7 +34,7 @@ pub(crate) fn parse_cbw<'a>(buff: &'a [u8]) -> Result<(Cbw<'a>), ParseCbwError> 
     Ok(Cbw {
         dCBWTag: u32::from_le_bytes([buff[4], buff[5], buff[6], buff[7]]),
         dCBWDataTransferLength: u32::from_le_bytes([buff[8], buff[9], buff[10], buff[11]]),
-        bmCBWFlags: buff[12] & 0x0F,
+        bmCBWFlags: buff[12],
         bCBWLUN: buff[13] & 0x1F,
         bCBWCBLength: len,
         CBWCB: &buff[15..15 + len as usize],
