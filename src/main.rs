@@ -4,16 +4,11 @@
 #![no_main]
 #![feature(type_alias_impl_trait)]
 
-mod cds;
-mod rbc;
-
 use core::mem::MaybeUninit;
 
 use embassy_executor::Spawner;
-use embassy_rp::gpio::{AnyPin, Level, Output, Pin};
+use embassy_rp::gpio::{Level, Output};
 use embassy_rp::{bind_interrupts, config};
-use embassy_time::{Duration, Timer};
-use embassy_usb_driver::{Endpoint, EndpointIn, EndpointOut};
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
@@ -21,267 +16,103 @@ bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<embassy_rp::peripherals::USB>;
 });
 
-struct State {
-    control: MaybeUninit<Control>,
+mod codes {
+    // Audio Interface Class Code
+    pub const AUDIO: u8 = 0x01;
+
+    // Audio Interface Subclass Codes
+    pub const SUBCLASS_UNDEFINED: u8 = 0x00;
+    pub const AUDIOCONTROL: u8 = 0x01;
+    pub const AUDIOSTREAMING: u8 = 0x02;
+    pub const MIDISTREAMING: u8 = 0x03;
+
+    // Audio Interface Protocol Codes
+    pub const PR_PROTOCOL_UNDEFINED: u8 = 0x00;
+
+    // Audio Class-Specific Descriptor Types
+    pub const CS_UNDEFINED: u8 = 0x20;
+    pub const CS_DEVICE: u8 = 0x21;
+    pub const CS_CONFIGURATION: u8 = 0x22;
+    pub const CS_STRING: u8 = 0x23;
+    pub const CS_INTERFACE: u8 = 0x24;
+    pub const CS_ENDPOINT: u8 = 0x25;
+
+    // Audio Class-Specific AC Interface Descriptor Subtypes
+    pub const AC_DESCRIPTOR_UNDEFINED: u8 = 0x00;
+    pub const HEADER: u8 = 0x01;
+    pub const INPUT_TERMINAL: u8 = 0x02;
+    pub const OUTPUT_TERMINAL: u8 = 0x03;
+    pub const MIXER_UNIT: u8 = 0x04;
+    pub const SELECTOR_UNIT: u8 = 0x05;
+    pub const FEATURE_UNIT: u8 = 0x06;
+    pub const PROCESSING_UNIT: u8 = 0x07;
+    pub const EXTENSION_UNIT: u8 = 0x08;
+
+    // Audio Class-Specific AS Interface Descriptor Subtypes
+    pub const AS_DESCRIPTOR_UNDEFINED: u8 = 0x00;
+    pub const AS_GENERAL: u8 = 0x01;
+    pub const FORMAT_TYPE: u8 = 0x02;
+    pub const FORMAT_SPECIFIC: u8 = 0x03;
+
+    // Processing Unit Process Types
+    pub const PROCESS_UNDEFINED: u8 = 0x00;
+    pub const UP_DOWNMIX_PROCESS: u8 = 0x01;
+    pub const DOLBY_PROLOGIC_PROCESS: u8 = 0x02;
+    pub const THREED_STEREO_EXTENDER_PROCESS: u8 = 0x03;
+    pub const REVERBERATION_PROCESS: u8 = 0x04;
+    pub const CHORUS_PROCESS: u8 = 0x05;
+    pub const DYN_RANGE_COMP_PROCESS: u8 = 0x06;
+
+    // DESCRIPTOR_UNDEFINED
+    pub const DESCRIPTOR_UNDEFINED: u8 = 0x00;
+    pub const EP_GENERAL: u8 = 0x01;
+
+    // Audio Class-Specific Request Codes
+    pub const REQUEST_CODE_UNDEFINED: u8 = 0x00;
+    pub const SET_CUR: u8 = 0x01;
+    pub const GET_CUR: u8 = 0x81;
+    pub const SET_MIN: u8 = 0x02;
+    pub const GET_MIN: u8 = 0x82;
+    pub const SET_MAX: u8 = 0x03;
+    pub const GET_MAX: u8 = 0x83;
+    pub const SET_RES: u8 = 0x04;
+    pub const GET_RES: u8 = 0x84;
+    pub const SET_MEM: u8 = 0x05;
+    pub const GET_MEM: u8 = 0x85;
+    pub const GET_STAT: u8 = 0xFF;
 }
 
-impl State {
-    pub fn new() -> Self {
-        Self {
-            control: MaybeUninit::uninit(),
-        }
-    }
-}
+use codes::*;
+use embassy_usb_driver::{Endpoint, EndpointIn};
 
-const MSD_GET_MAX_LUN: u8 = 0xfe;
-const MSD_BBB_RESET: u8 = 0xff;
+struct Handler {}
 
-const MAX_PACKET_SIZE: u16 = 64;
-
-struct Control {
-    data_if: embassy_usb::types::InterfaceNumber,
-}
-
-impl embassy_usb::Handler for Control {
+impl embassy_usb::Handler for Handler {
     fn control_in<'a>(
         &'a mut self,
-        req: embassy_usb::control::Request,
-        buf: &'a mut [u8],
+        _req: embassy_usb::control::Request,
+        _buf: &'a mut [u8],
     ) -> Option<embassy_usb::control::InResponse<'a>> {
-        if (req.request_type, req.recipient, req.index)
-            != (
-                embassy_usb::control::RequestType::Class,
-                embassy_usb::control::Recipient::Interface,
-                self.data_if.0 as u16,
-            )
-        {
-            return None;
-        }
-        match req.request {
-            MSD_GET_MAX_LUN if req.value == 0 && req.length == 1 => {
-                buf[0] = 0;
-                Some(embassy_usb::control::InResponse::Accepted(&buf[..1]))
-            }
-            _ => Some(embassy_usb::control::InResponse::Rejected),
-        }
+        None
     }
     fn control_out(
         &mut self,
-        req: embassy_usb::control::Request,
+        _req: embassy_usb::control::Request,
         _data: &[u8],
     ) -> Option<embassy_usb::control::OutResponse> {
-        if (req.request_type, req.recipient, req.index)
-            != (
-                embassy_usb::control::RequestType::Class,
-                embassy_usb::control::Recipient::Interface,
-                self.data_if.0 as u16,
-            )
-        {
-            return None;
-        }
-
-        match req.request {
-            MSD_BBB_RESET if req.value == 0 && req.length == 0 => {
-                Some(embassy_usb::control::OutResponse::Accepted)
-            }
-            _ => Some(embassy_usb::control::OutResponse::Rejected),
-        }
-    }
-}
-
-struct MassStorageClassBbb<'d, D: embassy_usb_driver::Driver<'d>> {
-    data_if: embassy_usb::types::InterfaceNumber,
-    bulk_in_ep: D::EndpointIn,
-    bulk_out_ep: D::EndpointOut,
-}
-
-impl<'d, D: embassy_usb_driver::Driver<'d>> MassStorageClassBbb<'d, D> {
-    pub fn new(builder: &mut embassy_usb::Builder<'d, D>, state: &'d mut State) -> Self {
-        let mut function = builder.function(0x08, 0x06, 0x50);
-        let mut interface = function.interface();
-        let data_if = interface.interface_number();
-        let mut alt_setting = interface.alt_setting(0x08, 0x06, 0x50, None);
-        let bulk_in_ep = alt_setting.endpoint_bulk_in(MAX_PACKET_SIZE);
-        let bulk_out_ep = alt_setting.endpoint_bulk_out(MAX_PACKET_SIZE);
-
-        drop(function);
-
-        let control = state.control.write(Control { data_if });
-        builder.handler(control);
-
-        Self {
-            data_if,
-            bulk_in_ep,
-            bulk_out_ep,
-        }
-    }
-}
-
-fn manage_cbw_and_data(cbw: &cds::Cbw, data: &rbc::Data) -> cds::Csw {
-    let is_host_to_device = cbw.bmCBWFlags & 0x80 != 0x80;
-    let host_assumed_data_length = cbw.dCBWDataTransferLength;
-
-    let mut csw = cds::Csw {
-        dCSWTag: cbw.dCBWTag,
-        dCSWDataResidue: 0,
-        bCSWStatus: 0,
-    };
-
-    if host_assumed_data_length == 0 {
-        if let &rbc::Data::None = data {
-            // do nothing
-        } else {
-            csw.bCSWStatus = 0x02;
-        }
-    } else if is_host_to_device {
-        // host to device
-        match data {
-            rbc::Data::None => {
-                csw.dCSWDataResidue = host_assumed_data_length;
-                csw.bCSWStatus = 0x01;
-            }
-            rbc::Data::RecvDummy(len) => {
-                if len.get() <= host_assumed_data_length {
-                    csw.dCSWDataResidue = host_assumed_data_length - len.get();
-                } else {
-                    csw.bCSWStatus = 0x02;
-                }
-            }
-            rbc::Data::Send(_) | rbc::Data::SendDummy(_) => {
-                csw.bCSWStatus = 0x02;
-            }
-        }
-    } else {
-        // device to host
-        match data {
-            rbc::Data::None => {
-                csw.dCSWDataResidue = host_assumed_data_length;
-                csw.bCSWStatus = 0x01;
-            }
-            rbc::Data::Send(data) => {
-                match data.len().cmp(&(host_assumed_data_length as _)) {
-                    core::cmp::Ordering::Equal => {
-                        // do nothing
-                    }
-                    core::cmp::Ordering::Less => {
-                        csw.dCSWDataResidue = host_assumed_data_length - data.len() as u32;
-                    }
-                    core::cmp::Ordering::Greater => {
-                        csw.bCSWStatus = 0x02;
-                    }
-                }
-            }
-            rbc::Data::SendDummy(len) => match len.get().cmp(&host_assumed_data_length) {
-                core::cmp::Ordering::Equal => {
-                    // do nothing
-                }
-                core::cmp::Ordering::Less => {
-                    csw.dCSWDataResidue = host_assumed_data_length - len.get();
-                }
-                core::cmp::Ordering::Greater => {
-                    csw.bCSWStatus = 0x02;
-                }
-            },
-            rbc::Data::RecvDummy(_) => {
-                csw.bCSWStatus = 0x02;
-            }
-        }
-    }
-    csw
-}
-
-async fn process_cbw<'d, 'a, 'b, D: embassy_usb_driver::Driver<'d>>(
-    mass_storage: &mut MassStorageClassBbb<'d, D>,
-    handler: &mut rbc::RbcHandler,
-    cbw: &cds::Cbw<'a>,
-    pin_red: &mut Output<'b, AnyPin>,
-) -> Result<bool, u8> {
-    let mut buffer = [0u8; 32];
-    let data = handler.handle(cbw.CBWCB, &mut buffer).map_err(|_| 0x01)?;
-    // 取り敢えず、Host の考える処理をする
-    if cbw.dCBWDataTransferLength == 0 {
-        // do nothing
-    } else if cbw.bmCBWFlags & 0x80 == 0 {
-        // host to device
-        let mut needed = cbw.dCBWDataTransferLength;
-        let mut buffer2 = [0u8; MAX_PACKET_SIZE as _];
-        while needed > 0 {
-            let read_size = mass_storage
-                .bulk_out_ep
-                .read(&mut buffer2)
-                .await
-                .map_err(|_| 0x04)?;
-            needed = needed.saturating_sub(read_size as _);
-        }
-    } else {
-        // device to host
-        let mut needed = cbw.dCBWDataTransferLength;
-        let real_send = match data {
-            Some(rbc::Data::Send(data)) => data,
-            _ => &[],
-        };
-        let mut real_send = &real_send[..core::cmp::min(needed as _, real_send.len())];
-        while needed > 0 {
-            let mut send_buffer = [0u8; MAX_PACKET_SIZE as _];
-            let buf = &mut send_buffer[..core::cmp::min(needed, MAX_PACKET_SIZE as _) as _];
-            let buf_len = buf.len();
-            let read_send_len = real_send.len();
-            let copy_read_send_len = core::cmp::min(buf_len, read_send_len);
-            buf[..copy_read_send_len].copy_from_slice(&real_send[..copy_read_send_len]);
-            mass_storage.bulk_in_ep.write(buf).await.map_err(|_| 0x08)?;
-            let send_data = buf.len() as u32;
-            needed = needed.saturating_sub(send_data);
-            real_send = &real_send[copy_read_send_len as _..];
-        }
-    }
-    let csw = match &data {
-        Some(data) => manage_cbw_and_data(&cbw, data),
-        None => cds::Csw {
-            dCSWTag: cbw.dCBWTag,
-            dCSWDataResidue: 0,
-            bCSWStatus: 0x01,
-        },
-    };
-    // Send Status
-    mass_storage
-        .bulk_in_ep
-        .write(cds::byteify_csw(&mut buffer, &csw).map_err(|_| 0x04)?.0)
-        .await
-        .map_err(|_| 0x10)?;
-
-    Ok(csw.bCSWStatus == 0x00)
-}
-
-async fn show_bits<'b, 'c>(
-    val: u8,
-    pin_red: &mut Output<'b, AnyPin>,
-    pin_blue: &mut Output<'c, AnyPin>,
-) {
-    for i in 0..7 {
-        pin_red.set_low();
-        Timer::after(Duration::from_millis(500)).await;
-        pin_red.set_high();
-        if val & (0x1 << i) != 0 {
-            pin_blue.set_low();
-        } else {
-            pin_blue.set_high();
-        }
-        Timer::after(Duration::from_millis(500)).await;
-        pin_blue.set_high();
+        None
     }
 }
 
 // In は Host から見て Device が In するので、Device は Write する
 #[embassy_executor::main]
-async fn main(spawner: Spawner) {
+async fn main(_spawner: Spawner) {
     let config = config::Config::default();
     let p = embassy_rp::init(config);
 
-    let mut pin_red = Output::new(p.PIN_17.degrade(), Level::High);
-    let mut pin_blue = Output::new(p.PIN_25.degrade(), Level::High);
-
-    // let mut _pin_green = Output::new(p.PIN_16.degrade(), Level::High);
-    spawner.spawn(blink(p.PIN_16.degrade())).unwrap();
+    let _g = Output::new(p.PIN_16, Level::High);
+    let mut r = Output::new(p.PIN_17, Level::High);
+    let mut b = Output::new(p.PIN_25, Level::High);
 
     let usb = p.USB;
     let driver = embassy_rp::usb::Driver::new(usb, Irqs);
@@ -290,11 +121,12 @@ async fn main(spawner: Spawner) {
     usb_config.serial_number = Some("THISISTESTERIALNUMBER");
 
     let mut device_descriptor_buf = [0u8; 128];
-    let mut config_descriptor_buf = [0u8; 128];
+    let mut config_descriptor_buf = [0u8; 512];
     let mut bos_descriptor_buf = [0u8; 128];
     let mut control_buf = [0u8; 128];
 
-    let mut state = State::new();
+    // let mut handler = Handler {};
+    let mut handler = MaybeUninit::uninit();
 
     let mut builder = embassy_usb::Builder::new(
         driver,
@@ -305,89 +137,116 @@ async fn main(spawner: Spawner) {
         &mut control_buf,
     );
 
-    let mut mass_storage = MassStorageClassBbb::new(&mut builder, &mut state);
+    // device -> config(function) -> interface -> alternate setting -> endpoint
+    // 通常、 1 interface が 1 driver に対応するが、IAD を使うと 1 driver が複数の interface を持てるので、統合して、 function と呼ぶ
+    // そもそも configulation には class はない（IAD でないと、この function に与えた class などは無視される）
+    let mut function = builder.function(0x00, 0x00, 0x00);
+    let mut interface = function.interface();
+    let mut alt_setting = interface.alt_setting(AUDIO, AUDIOCONTROL, PR_PROTOCOL_UNDEFINED, None);
+    alt_setting.descriptor(
+        CS_INTERFACE,
+        &[
+            HEADER, // bDescriptorSubtype
+            0x00, 0x01, // bcdADC
+            0x1e, 0x00, // wTotalLength
+            0x01, // bInCollection
+            0x01, // baInterfaceNr
+        ],
+    );
+    alt_setting.descriptor(
+        CS_INTERFACE,
+        &[
+            INPUT_TERMINAL, // bDescriptorSubtype
+            0x01,           // bTerminalID
+            0x01,
+            0x02, // wTerminalType
+            0x00, // bAssocTerminal
+            0x01, // bNrChannels
+            0x00,
+            0x00, // wChannelConfig
+            0x00, // iChannelNames
+            0x00, // iTerminal
+        ],
+    );
+    alt_setting.descriptor(
+        CS_INTERFACE,
+        &[
+            OUTPUT_TERMINAL, // bDescriptorSubtype
+            0x02,            // bTerminalID
+            0x01,
+            0x01, // wTerminalType
+            0x00, // bAssocTerminal
+            0x01, // bSourceID
+            0x00, // iTerminal
+        ],
+    );
+    let mut interface = function.interface();
+    let mut alt_setting = interface.alt_setting(AUDIO, AUDIOSTREAMING, PR_PROTOCOL_UNDEFINED, None);
+    let mut alt_setting = interface.alt_setting(AUDIO, AUDIOSTREAMING, PR_PROTOCOL_UNDEFINED, None);
+    alt_setting.descriptor(
+        CS_INTERFACE,
+        &[
+            AS_GENERAL, // bDescriptorSubtype
+            0x02,       // bTerminalLink
+            0x01,       // bDelay
+            0x01, 0x00, // wFormatTag
+        ],
+    );
+    alt_setting.descriptor(
+        CS_INTERFACE,
+        &[
+            FORMAT_TYPE, // bDescriptorSubtype
+            0x01,        // bFormatType
+            0x01,        // bNrChannels
+            0x02,        // bSubframeSize
+            0x10,        // bBitResolution
+            0x01,        // bSamFreqType
+            0x40,
+            0x1f,
+            0x00, // tSamFreq
+        ],
+    );
+    let mut endpoint = alt_setting.endpoint_isochronous_in(0x10, 0x01);
+    alt_setting.descriptor(
+        CS_ENDPOINT,
+        &[
+            EP_GENERAL, 0x00, // bmAttributes
+            0x00, // bLockDelayUnits
+            0x00, 0x00, // wLockDelay
+        ],
+    );
+
+    let handler = handler.write(Handler {});
+    drop(function);
+
+    builder.handler(handler);
 
     let mut device = builder.build();
 
-    let device_handle_future = device.run();
-    let mass_storage_future = async {
-        let mut first = true;
+    b.set_low();
+
+    const SQUARE: [u8; 16] = [
+        0xFF, 0x7F, 0xFF, 0x7F, 0xFF, 0x7F, 0xFF, 0x7F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00,
+    ];
+
+    embassy_futures::join::join(device.run(), async {
         loop {
-            mass_storage.bulk_in_ep.wait_enabled().await;
-            mass_storage.bulk_out_ep.wait_enabled().await;
-
-            let mut out_packet = [0u8; MAX_PACKET_SIZE as _];
-
-            let mut handler = rbc::RbcHandler::new();
-
+            endpoint.wait_enabled().await;
+            // write 16 bytes 0x00
             loop {
-                match mass_storage.bulk_out_ep.read(&mut out_packet).await {
-                    Ok(n) => match cds::parse_cbw(&out_packet[..n]) {
-                        Ok(cbw) => {
-                            match process_cbw(&mut mass_storage, &mut handler, &cbw, &mut pin_red)
-                                .await
-                            {
-                                Ok(_success_command) => {
-                                    pin_red.set_high();
-
-                                    LED_BLINK.store(
-                                        LED_BLINK.load(core::sync::atomic::Ordering::Relaxed) + 1,
-                                        core::sync::atomic::Ordering::Relaxed,
-                                    );
-                                }
-                                Err(num) => {
-                                    // pin_red.set_low();
-                                    show_bits(cbw.CBWCB.len() as _, &mut pin_red, &mut pin_blue)
-                                        .await;
-                                    pin_red.set_low();
-                                    Timer::after(Duration::from_millis(1000)).await;
-                                    show_bits(cbw.CBWCB[0], &mut pin_red, &mut pin_blue).await;
-                                    pin_red.set_low();
-                                    Timer::after(Duration::from_millis(1000)).await;
-                                    show_bits(num, &mut pin_red, &mut pin_blue).await;
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            pin_red.set_low();
-                            Timer::after(Duration::from_millis(3000)).await;
-                            pin_red.set_high();
-                        }
-                    },
-                    Err(_) => {
-                        pin_red.set_low();
-                        pin_red.set_low();
-                        Timer::after(Duration::from_millis(3000)).await;
-                        pin_red.set_high();
+                r.set_level(r.is_set_low().into());
+                match endpoint.write(&SQUARE).await {
+                    Ok(()) => {}
+                    Err(embassy_usb_driver::EndpointError::BufferOverflow) => {
+                        continue;
+                    }
+                    Err(embassy_usb_driver::EndpointError::Disabled) => {
                         break;
                     }
                 }
             }
         }
-    };
-
-    embassy_futures::join::join(device_handle_future, mass_storage_future).await;
-}
-
-static LED_BLINK: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
-
-#[embassy_executor::task]
-async fn blink(pin: AnyPin) {
-    let mut led = Output::new(pin, Level::High);
-
-    loop {
-        let v1to10 = {
-            let blink = LED_BLINK.load(core::sync::atomic::Ordering::Relaxed);
-            if blink == 0 {
-                0
-            } else {
-                LED_BLINK.load(core::sync::atomic::Ordering::Relaxed) % 9 + 1
-            }
-        };
-        let v10to1 = 10 - v1to10;
-        led.set_low();
-        Timer::after(Duration::from_millis(100 * v1to10 as u64)).await;
-        led.set_high();
-        Timer::after(Duration::from_millis(100 * v10to1 as u64)).await;
-    }
+    })
+    .await;
 }
