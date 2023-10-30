@@ -18,6 +18,8 @@ bind_interrupts!(struct Irqs {
 // その入力を、精算機に UART で伝送する
 // 精算機からシリアル通信を受け、サーボモータを制御する
 
+// Signal は PubSubChannel の方が本当は良いかもしれない
+
 async fn uart_task(
     uart: Uart<'_, impl uart::Instance, uart::Async>,
     coil: &Signal<impl embassy_sync::blocking_mutex::raw::RawMutex, bool>,
@@ -47,6 +49,7 @@ async fn uart_task(
         },
         async {
             loop {
+                // XXX: select 使えば、複数のシグナルを待てる https://docs.embassy.dev/embassy-futures/git/default/select/index.html
                 let current = coil.wait().await;
                 use embassy_rp::uart::Error::*;
                 // TODO: なんか通信処理する
